@@ -39,7 +39,7 @@
 #define GVE_DEFAULT_RX_COPYBREAK	(256)
 
 #define DEFAULT_MSG_LEVEL	(NETIF_MSG_DRV | NETIF_MSG_LINK)
-#define GVE_VERSION		 "1.4.5-0--c1659a8-oot"
+#define GVE_VERSION		 "1.4.5-0--183f265-oot"
 #define GVE_VERSION_PREFIX	"GVE-"
 
 // Minimum amount of time between queue kicks in msec (10 seconds)
@@ -462,8 +462,8 @@ int gve_napi_poll_dqo(struct napi_struct *napi, int budget)
 	if (block->tx) {
 		if (block->tx->q_num < priv->tx_cfg.num_queues)
 			reschedule |= gve_tx_poll_dqo(block, /*do_clean=*/true);
-		else
-			reschedule |= gve_xdp_poll_dqo(block);
+		else if (budget)
+			reschedule |= gve_xdp_poll_dqo(block, budget);
 	}
 
 	if (!budget)
@@ -471,6 +471,12 @@ int gve_napi_poll_dqo(struct napi_struct *napi, int budget)
 
 	if (block->rx) {
 		work_done = gve_rx_poll_dqo(block, budget);
+
+		/* Poll XSK TX as part of RX NAPI. Setup re-poll based on max of
+		 * TX and RX work done.
+		 */
+		if (priv->xdp_prog)
+			reschedule |= gve_xsk_tx_poll_dqo(block, budget);
 		reschedule |= work_done == budget;
 	}
 
@@ -1330,12 +1336,14 @@ static void gve_unreg_xsk_pool(struct gve_priv *priv, u16 qid)
 		return;
 
 	rx = &priv->rx[qid];
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
 	if (rx->xsk_pool) {
 		xsk_pool_dma_unmap(rx->xsk_pool,
 			           DMA_ATTR_SKIP_CPU_SYNC |
 				   DMA_ATTR_WEAK_ORDERING);
 		rx->xsk_pool = NULL;
 	}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 	if (xdp_rxq_info_is_reg(&rx->xsk_rxq)) {
 		xdp_rxq_info_unreg_mem_model(&rx->xsk_rxq);
 		xdp_rxq_info_unreg(&rx->xsk_rxq);
@@ -1712,15 +1720,19 @@ static int gve_set_xdp(struct gve_priv *priv, struct bpf_prog *prog,
 	int err = 0;
 	u32 status;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0)
 	old_prog = READ_ONCE(priv->xdp_prog);
 #else /* LINUX_VERSION_CODE < KERNEL_VERSION(3,20,0) */
 	old_prog = ACCESS_ONCE(priv->xdp_prog);
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(3,20,0) */
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 	if (!netif_running(priv->dev)) {
 		WRITE_ONCE(priv->xdp_prog, prog);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
 		if (old_prog)
 			bpf_prog_put(old_prog);
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 
 		/* Update priv XDP queue configuration */
 		priv->tx_cfg.num_xdp_queues = priv->xdp_prog ?
@@ -1737,8 +1749,10 @@ static int gve_set_xdp(struct gve_priv *priv, struct bpf_prog *prog,
 		goto out;
 
 	WRITE_ONCE(priv->xdp_prog, prog);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
 	if (old_prog)
 		bpf_prog_put(old_prog);
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 
 out:
 	status = ioread32be(&priv->reg_bar0->device_status);
@@ -1784,12 +1798,29 @@ static int gve_xsk_pool_enable(struct net_device *dev,
 		return 0;
 
 	err = gve_reg_xsk_pool(priv, dev, pool, qid);
-	if (err)
+	if (err) {
 		clear_bit(qid, priv->xsk_pools);
+		return err;
+	}
 
+	/* If XDP prog is not installed, return */
+	if (!priv->xdp_prog)
+		return 0;
+
+	/* Stop and start RDA queues to repost buffers. */
+	if (!gve_is_qpl(priv)) {
+		err = gve_configure_rings_xdp(priv, priv->rx_cfg.num_queues);
+		if (err)
+			goto err_xsk_pool_registered;
+	}
+	return 0;
+err_xsk_pool_registered:
+	gve_unreg_xsk_pool(priv, qid);
+	clear_bit(qid, priv->xsk_pools);
 	return err;
 }
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
 static int gve_xsk_pool_disable(struct net_device *dev,
@@ -1799,14 +1830,22 @@ static int gve_xsk_pool_disable(struct net_device *dev,
 	struct napi_struct *napi_rx;
 	struct napi_struct *napi_tx;
 	int tx_qid;
+	int err;
 
 	if (qid >= priv->rx_cfg.num_queues)
 		return -EINVAL;
 
 	clear_bit(qid, priv->xsk_pools);
 
-	if (!priv->xdp_prog || !netif_running(dev))
+	if (!netif_running(dev))
 		return 0;
+
+	/* Stop and start RDA queues to repost buffers. */
+	if (!gve_is_qpl(priv) && priv->xdp_prog) {
+		err = gve_configure_rings_xdp(priv, priv->rx_cfg.num_queues);
+		if (err)
+			return err;
+	}
 
 	napi_rx = &priv->ntfy_blocks[priv->rx[qid].ntfy_id].napi;
 	napi_disable(napi_rx); /* make sure current rx poll is done */
@@ -1819,12 +1858,14 @@ static int gve_xsk_pool_disable(struct net_device *dev,
 	smp_mb(); /* Make sure it is visible to the workers on datapath */
 
 	napi_enable(napi_rx);
-	if (gve_rx_work_pending(&priv->rx[qid]))
-		napi_schedule(napi_rx);
-
 	napi_enable(napi_tx);
-	if (gve_tx_clean_pending(priv, &priv->tx[tx_qid]))
-		napi_schedule(napi_tx);
+	if (gve_is_gqi(priv)) {
+		if (gve_rx_work_pending(&priv->rx[qid]))
+			napi_schedule(napi_rx);
+
+		if (gve_tx_clean_pending(priv, &priv->tx[tx_qid]))
+			napi_schedule(napi_tx);
+	}
 
 	return 0;
 }
@@ -1835,6 +1876,9 @@ static int gve_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
 {
 	struct gve_priv *priv = netdev_priv(dev);
 	struct napi_struct *napi;
+
+	if (!gve_get_napi_enabled(priv))
+		return -ENETDOWN;
 
 	if (queue_id >= priv->rx_cfg.num_queues || !priv->xdp_prog)
 		return -EINVAL;
@@ -1868,15 +1912,8 @@ static int verify_xdp_configuration(struct net_device *dev
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL)
 	/* Check XDP support for various queue formats. */
 	switch (priv->queue_format) {
-	case GVE_GQI_QPL_FORMAT:/* GQI_QPL supports everything, so ignore. */  break;
-	case GVE_DQO_RDA_FORMAT: 
-	case GVE_DQO_QPL_FORMAT:  if (xdp->command == XDP_SETUP_XSK_POOL) {
-			netdev_warn(dev,
-				    "AF_XDP zero-copy is not supported in mode %d\n",
-				    priv->queue_format);
-			return -EOPNOTSUPP;
-		}
-		break;
+	case GVE_GQI_QPL_FORMAT: 
+	case GVE_DQO_RDA_FORMAT:  break;
 default:  netdev_warn(dev, "XDP is not supported in mode %d.\n",
 		      priv->queue_format);
 		return -EOPNOTSUPP;
@@ -2467,10 +2504,9 @@ static void gve_set_netdev_xdp_features(struct gve_priv *priv)
 
 	switch (priv->queue_format) {
 	case GVE_GQI_QPL_FORMAT:
-		priv->dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
-		fallthrough;
 	case GVE_DQO_RDA_FORMAT:
-		priv->dev->xdp_features |= NETDEV_XDP_ACT_BASIC |
+		priv->dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY |
+					   NETDEV_XDP_ACT_BASIC |
 					   NETDEV_XDP_ACT_NDO_XMIT |
 					   NETDEV_XDP_ACT_REDIRECT;
 		break;

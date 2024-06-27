@@ -16,6 +16,9 @@
 #include <linux/tcp.h>
 #include <linux/slab.h>
 #include <linux/skbuff.h>
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+#include <net/xdp_sock_drv.h>
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 
 /* Returns true if tx_bufs are available. */
 static bool gve_has_free_tx_qpl_bufs(struct gve_tx_ring *tx, int count)
@@ -265,6 +268,13 @@ static void gve_tx_free_ring_dqo(struct gve_priv *priv, struct gve_tx_ring *tx,
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) */
 	tx->dqo.tx_qpl_buf_next = NULL;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	kvfree(tx->dqo.xsk_reorder_buf);
+#else /* LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) */
+	kfree(tx->dqo.xsk_reorder_buf);
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) */
+	tx->dqo.xsk_reorder_buf = NULL;
+
 	if (tx->dqo.qpl) {
 		qpl_id = gve_tx_qpl_id(priv, tx->q_num);
 		gve_free_queue_page_list(priv, tx->dqo.qpl, qpl_id);
@@ -374,6 +384,19 @@ static int gve_tx_alloc_ring_dqo(struct gve_priv *priv,
 
 	tx->dqo.pending_packets[tx->dqo.num_pending_packets - 1].next = -1;
 	atomic_set_release(&tx->dqo_compl.free_pending_packets, -1);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	tx->dqo.xsk_reorder_buf = kvcalloc(tx->dqo.complq_mask + 1,
+					   sizeof(tx->dqo.xsk_reorder_buf[0]),
+					   GFP_KERNEL);
+#else /* LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) */
+	tx->dqo.xsk_reorder_buf = kcalloc(tx->dqo.complq_mask + 1,
+					  sizeof(tx->dqo.xsk_reorder_buf[0]),
+					  GFP_KERNEL);
+#endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) */
+	if (!tx->dqo.xsk_reorder_buf)
+		goto err;
+
 	tx->dqo_compl.miss_completions.head = -1;
 	tx->dqo_compl.miss_completions.tail = -1;
 	tx->dqo_compl.timed_out_completions.head = -1;
@@ -1039,6 +1062,37 @@ drop:
 	return 0;
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_xsk_reorder_buf_push_dqo(struct gve_tx_ring *tx,
+					 u16 completion_tag) {
+	u32 tail = tx->dqo_compl.xsk_reorder_buf_tail;
+
+	tx->dqo.xsk_reorder_buf[tail] = completion_tag;
+	tail = (tail + 1) & tx->dqo.complq_mask;
+	tx->dqo_compl.xsk_reorder_buf_tail = tail;
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static struct gve_tx_pending_packet_dqo *
+gve_xsk_reorder_buf_head(struct gve_tx_ring *tx) {
+	u32 head = tx->dqo_compl.xsk_reorder_buf_head;
+	u32 tail = tx->dqo_compl.xsk_reorder_buf_tail;
+
+	if (head == tail)
+		return NULL;
+
+	return &tx->dqo.pending_packets[tx->dqo.xsk_reorder_buf[head]];
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_xsk_reorder_buf_pop_dqo(struct gve_tx_ring *tx) {
+	tx->dqo_compl.xsk_reorder_buf_head++;
+	tx->dqo_compl.xsk_reorder_buf_head &= tx->dqo.complq_mask;
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
 /* Transmit a given skb and ring the doorbell. */
 netdev_tx_t gve_tx_dqo(struct sk_buff *skb, struct net_device *dev)
 {
@@ -1077,6 +1131,66 @@ netdev_tx_t gve_tx_dqo(struct sk_buff *skb, struct net_device *dev)
 	gve_tx_put_doorbell_dqo(priv, tx->q_resources, tx->dqo_tx.tail);
 	return NETDEV_TX_OK;
 }
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static bool gve_xsk_tx_dqo(struct gve_priv *priv, struct gve_tx_ring *tx,
+			   int budget) {
+	struct xsk_buff_pool *pool = tx->xsk_pool;
+	struct xdp_desc desc;
+	bool repoll = false;
+	int sent = 0;
+
+	spin_lock(&tx->xdp_lock);
+	for (; sent < budget; sent++) {
+		struct gve_tx_pending_packet_dqo *pkt;
+		int num_descs_needed = 1;
+		s16 completion_tag;
+
+		if (unlikely(!gve_has_pending_packet(tx) ||
+			     !gve_has_tx_slots_available(tx, num_descs_needed))) {
+			repoll = true;
+			break;
+		}
+
+		if (!xsk_tx_peek_desc(pool, &desc))
+			break;
+
+		pkt = gve_alloc_pending_packet(tx);
+		pkt->type = GVE_TX_PENDING_PACKET_DQO_XSK;
+		pkt->num_bufs = 0;
+		completion_tag = pkt - tx->dqo.pending_packets;
+
+		dma_addr_t addr;
+		u32 desc_idx;
+
+		addr = xsk_buff_raw_get_dma(pool, desc.addr);
+		xsk_buff_raw_dma_sync_for_device(pool, addr, desc.len);
+
+		desc_idx = tx->dqo_tx.tail;
+		gve_tx_fill_pkt_desc_dqo(tx, &desc_idx,
+					 true, desc.len,
+					 addr, completion_tag, true,
+					 false);
+		++pkt->num_bufs;
+		gve_tx_update_tail(tx, desc_idx);
+		tx->dqo_tx.posted_packet_desc_cnt += pkt->num_bufs;
+		gve_xsk_reorder_buf_push_dqo(tx, completion_tag);
+	}
+
+	if (sent) {
+		gve_tx_put_doorbell_dqo(priv, tx->q_resources, tx->dqo_tx.tail);
+		xsk_tx_release(pool);
+	}
+
+	spin_unlock(&tx->xdp_lock);
+
+	u64_stats_update_begin(&tx->statss);
+	tx->xdp_xsk_sent += sent;
+	u64_stats_update_end(&tx->statss);
+
+	return (sent == budget) || repoll;
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 
 static void add_to_list(struct gve_tx_ring *tx, struct gve_index_list *list,
 			struct gve_tx_pending_packet_dqo *pending_packet)
@@ -1224,6 +1338,14 @@ static void gve_handle_packet_completion(struct gve_priv *priv,
 		gve_free_pending_packet(tx, pending_packet);
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 		break;
+	case GVE_TX_PENDING_PACKET_DQO_XSK:
+		pending_packet->state = GVE_PACKET_STATE_DATA_COMPL_RCVD;
+		break;
+	case GVE_TX_PENDING_PACKET_DQO_XSK_COMPLETE:
+		/* The packet has already been accounted for in xsk_tx_complete.
+		 * Free the pending packet */
+		gve_free_pending_packet(tx, pending_packet);
+		break;
 	default:
 		WARN_ON_ONCE(1);
 	}
@@ -1329,6 +1451,41 @@ static void remove_timed_out_completions(struct gve_priv *priv,
 	}
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_tx_process_xsk_completions(struct gve_tx_ring *tx)
+{
+	u32 num_xsks = 0;
+
+	while (true) {
+		struct gve_tx_pending_packet_dqo *pending_packet =
+			gve_xsk_reorder_buf_head(tx);
+
+		if (!pending_packet || (pending_packet->state ==
+		    GVE_PACKET_STATE_PENDING_DATA_COMPL))
+			break;
+
+		num_xsks++;
+		gve_xsk_reorder_buf_pop_dqo(tx);
+
+		/* If the packet completion has been received,
+		 * remove the packet from the pending list */
+		if (pending_packet->state ==
+		    GVE_PACKET_STATE_DATA_COMPL_RCVD) {
+			gve_free_pending_packet(tx, pending_packet);
+			continue;
+		}
+
+		/* If a reinjection complete has not yet been received, this
+		 * packet will be removed from the pending list when a reinjection
+		 * completion is received or on reinjection completion timeout */
+                pending_packet->type = GVE_TX_PENDING_PACKET_DQO_XSK_COMPLETE;
+	}
+
+	if (num_xsks)
+		xsk_tx_completed(tx->xsk_pool, num_xsks);
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
 int gve_clean_tx_done_dqo(struct gve_priv *priv, struct gve_tx_ring *tx,
 			  struct napi_struct *napi)
 {
@@ -1408,6 +1565,11 @@ int gve_clean_tx_done_dqo(struct gve_priv *priv, struct gve_tx_ring *tx,
 					  pkt_compl_pkts + miss_compl_pkts,
 					  pkt_compl_bytes + miss_compl_bytes);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+	if (tx->xsk_pool)
+		gve_tx_process_xsk_completions(tx);
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
 	remove_miss_completions(priv, tx);
 	remove_timed_out_completions(priv, tx);
 
@@ -1443,17 +1605,33 @@ bool gve_tx_poll_dqo(struct gve_notify_block *block, bool do_clean)
 	return compl_desc->generation != tx->dqo_compl.cur_gen_bit;
 }
 
-bool gve_xdp_poll_dqo(struct gve_notify_block *block)
+bool gve_xsk_tx_poll_dqo(struct gve_notify_block *rx_block, int budget)
+{
+	struct gve_rx_ring *rx = rx_block->rx;
+	struct gve_priv *priv = rx->gve;
+	struct gve_tx_ring *tx;
+
+	tx = &priv->tx[gve_xdp_tx_queue_id(priv, rx->q_num)];
+	if (likely(tx->xsk_pool))
+		return gve_xsk_tx_dqo(priv, tx, budget);
+
+	return 0;
+}
+
+bool gve_xdp_poll_dqo(struct gve_notify_block *block, int budget)
 {
 	struct gve_tx_compl_desc *compl_desc;
 	struct gve_tx_ring *tx = block->tx;
 	struct gve_priv *priv = block->priv;
+	bool repoll;
 
 	gve_clean_tx_done_dqo(priv, tx, &block->napi);
 
 	/* Return true if we still have work. */
 	compl_desc = &tx->dqo.compl_ring[tx->dqo_compl.head];
-	return compl_desc->generation != tx->dqo_compl.cur_gen_bit;
+	repoll = compl_desc->generation != tx->dqo_compl.cur_gen_bit;
+
+	return repoll;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)

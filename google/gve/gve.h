@@ -179,6 +179,9 @@ struct gve_rx_buf_state_dqo {
 	/* The page posted to HW. */
 	struct gve_rx_slot_page_info page_info;
 
+	/* XSK buffer */
+	struct xdp_buff *xsk_buff;
+
 	/* The DMA address corresponding to `page_info`. */
 	dma_addr_t addr;
 
@@ -388,11 +391,15 @@ enum gve_packet_state {
 	GVE_PACKET_STATE_PENDING_REINJECT_COMPL,
 	/* No valid completion received within the specified timeout. */
 	GVE_PACKET_STATE_TIMED_OUT_COMPL,
+	/* Packet completion received */
+	GVE_PACKET_STATE_DATA_COMPL_RCVD,
 };
 
 enum gve_tx_pending_packet_dqo_type {
 	GVE_TX_PENDING_PACKET_DQO_SKB,
-	GVE_TX_PENDING_PACKET_DQO_XDP_FRAME
+	GVE_TX_PENDING_PACKET_DQO_XDP_FRAME,
+	GVE_TX_PENDING_PACKET_DQO_XSK,
+	GVE_TX_PENDING_PACKET_DQO_XSK_COMPLETE,
 };
 
 struct gve_tx_pending_packet_dqo {
@@ -528,6 +535,8 @@ struct gve_tx_ring {
 
 			/* Last TX ring index fetched by HW */
 			atomic_t hw_tx_head;
+			u16 xsk_reorder_buf_head;
+			u16 xsk_reorder_buf_tail;
 
 			/* List to track pending packets which received a miss
 			 * completion but not a corresponding reinjection.
@@ -582,6 +591,7 @@ struct gve_tx_ring {
 		struct {
 			union gve_tx_desc_dqo *tx_ring;
 			struct gve_tx_compl_desc *compl_ring;
+			u16* xsk_reorder_buf;
 
 			struct gve_tx_pending_packet_dqo *pending_packets;
 			s16 num_pending_packets;

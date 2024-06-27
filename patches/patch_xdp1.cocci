@@ -189,6 +189,16 @@ int gve_xsk_tx(...) { ... }
 +#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) */
 
 @@
+type bool;
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static bool gve_xsk_tx_dqo(...)
+{
+...
+}
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
 @@
 +#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0))
 int gve_xsk_tx_poll(...);
@@ -206,7 +216,6 @@ identifier work_done, block, budget;
 +#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0))
 work_done = max_t(int, work_done, gve_xsk_tx_poll(block, budget));
 +#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) */
-
 
 @@
 @@
@@ -389,6 +398,82 @@ int gve_xdp_xmit_one_dqo(struct gve_priv *priv, struct gve_tx_ring *tx,
 
 @@
 @@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+if (...) {
+...
+xsk_buff_free(...)
+...
+}
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+identifier buf_state;
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+if (buf_state->xsk_buff) {
+  return gve_rx_xsk_dqo(...);
+}
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static int gve_rx_xsk_dqo(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+void gve_xsk_done_dqo(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+int gve_xdp_tx_dqo(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+identifier queue;
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+if (queue->xsk_pool) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_tx_process_xsk_completions(...) {...}
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static int gve_rx_xsk_dqo(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_xsk_reorder_buf_pop_dqo(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_xsk_reorder_buf_push_dqo(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+type  pending_packet;
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+pending_packet gve_xsk_reorder_buf_head(...) { ... }
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+
+@@
+@@
 static void gve_set_netdev_xdp_features(struct gve_priv *priv)
 {
 +#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
@@ -411,15 +496,8 @@ if (dev->features & NETIF_F_LRO) { ... }
 +#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL)
 +	/* Check XDP support for various queue formats. */
 +	switch (priv->queue_format) {
-+	case GVE_GQI_QPL_FORMAT: /* GQI_QPL supports everything, so ignore. */
-+		break;
++	case GVE_GQI_QPL_FORMAT:
 +	case GVE_DQO_RDA_FORMAT:
-+	case GVE_DQO_QPL_FORMAT:
-+		if (xdp->command == XDP_SETUP_XSK_POOL) {
-+			netdev_warn(dev, "AF_XDP zero-copy is not supported in mode %d\n",
-+				    priv->queue_format);
-+			return -EOPNOTSUPP;
-+		}
 +		break;
 +	default:
 +		netdev_warn(dev, "XDP is not supported in mode %d.\n",

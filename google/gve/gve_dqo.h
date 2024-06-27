@@ -11,7 +11,10 @@
 
 #define GVE_ITR_ENABLE_BIT_DQO BIT(0)
 #define GVE_ITR_CLEAR_PBA_BIT_DQO BIT(1)
+#define GVE_ITR_SW_INT_BIT_DQO BIT(2)
 #define GVE_ITR_NO_UPDATE_DQO (3 << 3)
+#define GVE_ITR_SW_ITR_INDX_ENA BIT(24)
+#define GVE_ITR_SW_ITR_INDX_NO_UPDATE (3 << 25)
 
 #define GVE_ITR_INTERVAL_DQO_SHIFT 5
 #define GVE_ITR_INTERVAL_DQO_MASK ((1 << 12) - 1)
@@ -37,7 +40,8 @@ netdev_features_t gve_features_check_dqo(struct sk_buff *skb,
 					 struct net_device *dev,
 					 netdev_features_t features);
 bool gve_tx_poll_dqo(struct gve_notify_block *block, bool do_clean);
-bool gve_xdp_poll_dqo(struct gve_notify_block *block);
+bool gve_xdp_poll_dqo(struct gve_notify_block *block, int budget);
+bool gve_xsk_tx_poll_dqo(struct gve_notify_block *block, int budget);
 int gve_rx_poll_dqo(struct gve_notify_block *block, int budget);
 int gve_tx_alloc_rings_dqo(struct gve_priv *priv,
 			   struct gve_tx_alloc_rings_cfg *cfg);
