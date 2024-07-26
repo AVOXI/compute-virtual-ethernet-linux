@@ -44,6 +44,36 @@ static void gve_unreg_xdp_info(struct gve_priv *priv)
 }
 
 @@
+identifier priv;
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+priv->xsk_pools = bitmap_zalloc(...);
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+identifier priv;
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+bitmap_free(priv->xsk_pools);
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static int gve_reg_xsk_pool(...) {
+...
+}
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
+@@
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_unreg_xsk_pool(...) {
+...
+}
++#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+@@
 @@
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0)
 err = xdp_rxq_info_reg_mem_model(

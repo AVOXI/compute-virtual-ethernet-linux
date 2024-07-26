@@ -5,6 +5,7 @@
  */
 
 #include "gve_linux_version.h"
+#include <linux/bitmap.h>
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
 #include <linux/bpf.h>
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
@@ -38,7 +39,7 @@
 #define GVE_DEFAULT_RX_COPYBREAK	(256)
 
 #define DEFAULT_MSG_LEVEL	(NETIF_MSG_DRV | NETIF_MSG_LINK)
-#define GVE_VERSION		 "1.4.5-0--b0b09e5-oot"
+#define GVE_VERSION		 "1.4.5-0--c1659a8-oot"
 #define GVE_VERSION_PREFIX	"GVE-"
 
 // Minimum amount of time between queue kicks in msec (10 seconds)
@@ -1278,6 +1279,74 @@ static int gve_reset_recovery(struct gve_priv *priv, bool was_up);
 static void gve_turndown(struct gve_priv *priv);
 static void gve_turnup(struct gve_priv *priv);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static int gve_reg_xsk_pool(struct gve_priv *priv, struct net_device *dev,
+			    struct xsk_buff_pool *pool, u16 qid)
+{
+	struct napi_struct *napi;
+	struct gve_rx_ring *rx;
+	u16 tx_qid;
+	int err;
+
+ 	err = xsk_pool_dma_map(pool, &priv->pdev->dev,
+ 			       DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
+ 	if (err)
+ 		return err;
+
+ 	rx = &priv->rx[qid];
+ 	napi = &priv->ntfy_blocks[rx->ntfy_id].napi;
+ 	err = xdp_rxq_info_reg(&rx->xsk_rxq, dev, qid, napi->napi_id);
+ 	if (err)
+ 		goto err;
+
+ 	err = xdp_rxq_info_reg_mem_model(&rx->xsk_rxq,
+ 					 MEM_TYPE_XSK_BUFF_POOL, NULL);
+ 	if (err)
+ 		goto err;
+
+ 	xsk_pool_set_rxq_info(pool, &rx->xsk_rxq);
+ 	rx->xsk_pool = pool;
+
+ 	tx_qid = gve_xdp_tx_queue_id(priv, qid);
+ 	priv->tx[tx_qid].xsk_pool = pool;
+
+ 	return 0;
+ err:
+ 	if (xdp_rxq_info_is_reg(&rx->xsk_rxq))
+ 		xdp_rxq_info_unreg(&rx->xsk_rxq);
+
+ 	xsk_pool_dma_unmap(pool,
+ 			   DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
+ 	return err;
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+static void gve_unreg_xsk_pool(struct gve_priv *priv, u16 qid)
+{
+	struct gve_rx_ring *rx;
+
+	if (!priv->rx)
+		return;
+
+	rx = &priv->rx[qid];
+	if (rx->xsk_pool) {
+		xsk_pool_dma_unmap(rx->xsk_pool,
+			           DMA_ATTR_SKIP_CPU_SYNC |
+				   DMA_ATTR_WEAK_ORDERING);
+		rx->xsk_pool = NULL;
+	}
+	if (xdp_rxq_info_is_reg(&rx->xsk_rxq)) {
+		xdp_rxq_info_unreg_mem_model(&rx->xsk_rxq);
+		xdp_rxq_info_unreg(&rx->xsk_rxq);
+	}
+
+	if (!priv->tx)
+		return;
+	priv->tx[gve_xdp_tx_queue_id(priv, qid)].xsk_pool = NULL;
+}
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+
 static int gve_reg_xdp_info(struct gve_priv *priv, struct net_device *dev)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
@@ -1285,7 +1354,6 @@ static int gve_reg_xdp_info(struct gve_priv *priv, struct net_device *dev)
 	struct gve_rx_ring *rx;
 	int err = 0;
 	int i, j;
-	u32 tx_qid;
 
 	if (!priv->tx_cfg.num_xdp_queues)
 		return 0;
@@ -1314,34 +1382,30 @@ static int gve_reg_xdp_info(struct gve_priv *priv, struct net_device *dev)
 		}
 		if (err)
 			goto err;
-		rx->xsk_pool = xsk_get_pool_from_qid(dev, i);
-		if (rx->xsk_pool) {
-			err = xdp_rxq_info_reg(&rx->xsk_rxq, dev, i,
-					       napi->napi_id);
-			if (err)
-				goto err;
-			err = xdp_rxq_info_reg_mem_model(&rx->xsk_rxq,
-							 MEM_TYPE_XSK_BUFF_POOL, NULL);
-			if (err)
-				goto err;
-			xsk_pool_set_rxq_info(rx->xsk_pool,
-					      &rx->xsk_rxq);
-		}
-	}
 
-	for (i = 0; i < priv->tx_cfg.num_xdp_queues; i++) {
-		tx_qid = gve_xdp_tx_queue_id(priv, i);
-		priv->tx[tx_qid].xsk_pool = xsk_get_pool_from_qid(dev, i);
+		if (!test_bit(i, priv->xsk_pools))
+			continue;
+		rx->xsk_pool = xsk_get_pool_from_qid(dev, i);
+		if (!rx->xsk_pool)
+			continue;
+
+		err = gve_reg_xsk_pool(priv, dev, rx->xsk_pool, i);
+		if (err)
+			goto err;
 	}
 	return 0;
 
 err:
 	for (j = i; j >= 0; j--) {
 		rx = &priv->rx[j];
-		if (xdp_rxq_info_is_reg(&rx->xdp_rxq))
+		if (xdp_rxq_info_is_reg(&rx->xdp_rxq)) {
+			xdp_rxq_info_unreg_mem_model(&rx->xdp_rxq);
 			xdp_rxq_info_unreg(&rx->xdp_rxq);
-		if (xdp_rxq_info_is_reg(&rx->xsk_rxq))
+		}
+		if (xdp_rxq_info_is_reg(&rx->xsk_rxq)) {
+			xdp_rxq_info_unreg_mem_model(&rx->xsk_rxq);
 			xdp_rxq_info_unreg(&rx->xsk_rxq);
+		}
 	}
 	return err;
 #else /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
@@ -1352,24 +1416,18 @@ err:
 static void gve_unreg_xdp_info(struct gve_priv *priv)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
-	int i, tx_qid;
+	int i;
 
-	if (!priv->tx_cfg.num_xdp_queues || !priv->rx || !priv->tx)
+	if (!priv->tx_cfg.num_xdp_queues || !priv->rx)
 		return;
 
 	for (i = 0; i < priv->rx_cfg.num_queues; i++) {
 		struct gve_rx_ring *rx = &priv->rx[i];
-
-		xdp_rxq_info_unreg(&rx->xdp_rxq);
-		if (rx->xsk_pool) {
-			xdp_rxq_info_unreg(&rx->xsk_rxq);
-			rx->xsk_pool = NULL;
+		if (xdp_rxq_info_is_reg(&rx->xdp_rxq)) {
+			xdp_rxq_info_unreg_mem_model(&rx->xdp_rxq);
+			xdp_rxq_info_unreg(&rx->xdp_rxq);
 		}
-	}
-
-	for (i = 0; i < priv->tx_cfg.num_xdp_queues; i++) {
-		tx_qid = gve_xdp_tx_queue_id(priv, i);
-		priv->tx[tx_qid].xsk_pool = NULL;
+		gve_unreg_xsk_pool(priv, i);
 	}
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 }
@@ -1708,9 +1766,6 @@ static int gve_xsk_pool_enable(struct net_device *dev,
 			       u16 qid)
 {
 	struct gve_priv *priv = netdev_priv(dev);
-	struct napi_struct *napi;
-	struct gve_rx_ring *rx;
-	int tx_qid;
 	int err;
 
 	if (qid >= priv->rx_cfg.num_queues) {
@@ -1723,39 +1778,15 @@ static int gve_xsk_pool_enable(struct net_device *dev,
 		return -EINVAL;
 	}
 
-	err = xsk_pool_dma_map(pool, &priv->pdev->dev,
-			       DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
-	if (err)
-		return err;
+	set_bit(qid, priv->xsk_pools);
 
-	/* If XDP prog is not installed, return */
-	if (!priv->xdp_prog)
+	if (!netif_running(dev))
 		return 0;
 
-	rx = &priv->rx[qid];
-	napi = &priv->ntfy_blocks[rx->ntfy_id].napi;
-	err = xdp_rxq_info_reg(&rx->xsk_rxq, dev, qid, napi->napi_id);
+	err = gve_reg_xsk_pool(priv, dev, pool, qid);
 	if (err)
-		goto err;
+		clear_bit(qid, priv->xsk_pools);
 
-	err = xdp_rxq_info_reg_mem_model(&rx->xsk_rxq,
-					 MEM_TYPE_XSK_BUFF_POOL, NULL);
-	if (err)
-		goto err;
-
-	xsk_pool_set_rxq_info(pool, &rx->xsk_rxq);
-	rx->xsk_pool = pool;
-
-	tx_qid = gve_xdp_tx_queue_id(priv, qid);
-	priv->tx[tx_qid].xsk_pool = pool;
-
-	return 0;
-err:
-	if (xdp_rxq_info_is_reg(&rx->xsk_rxq))
-		xdp_rxq_info_unreg(&rx->xsk_rxq);
-
-	xsk_pool_dma_unmap(pool,
-			   DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
 	return err;
 }
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
@@ -1767,36 +1798,24 @@ static int gve_xsk_pool_disable(struct net_device *dev,
 	struct gve_priv *priv = netdev_priv(dev);
 	struct napi_struct *napi_rx;
 	struct napi_struct *napi_tx;
-	struct xsk_buff_pool *pool;
 	int tx_qid;
 
-	pool = xsk_get_pool_from_qid(dev, qid);
-	if (!pool)
-		return -EINVAL;
 	if (qid >= priv->rx_cfg.num_queues)
 		return -EINVAL;
 
-	/* If XDP prog is not installed, unmap DMA and return */
-	if (!priv->xdp_prog)
-		goto done;
+	clear_bit(qid, priv->xsk_pools);
 
-	tx_qid = gve_xdp_tx_queue_id(priv, qid);
-	if (!netif_running(dev)) {
-		priv->rx[qid].xsk_pool = NULL;
-		xdp_rxq_info_unreg(&priv->rx[qid].xsk_rxq);
-		priv->tx[tx_qid].xsk_pool = NULL;
-		goto done;
-	}
+	if (!priv->xdp_prog || !netif_running(dev))
+		return 0;
 
 	napi_rx = &priv->ntfy_blocks[priv->rx[qid].ntfy_id].napi;
 	napi_disable(napi_rx); /* make sure current rx poll is done */
 
+	tx_qid = gve_xdp_tx_queue_id(priv, qid);
 	napi_tx = &priv->ntfy_blocks[priv->tx[tx_qid].ntfy_id].napi;
 	napi_disable(napi_tx); /* make sure current tx poll is done */
 
-	priv->rx[qid].xsk_pool = NULL;
-	xdp_rxq_info_unreg(&priv->rx[qid].xsk_rxq);
-	priv->tx[tx_qid].xsk_pool = NULL;
+	gve_unreg_xsk_pool(priv, qid);
 	smp_mb(); /* Make sure it is visible to the workers on datapath */
 
 	napi_enable(napi_rx);
@@ -1807,9 +1826,6 @@ static int gve_xsk_pool_disable(struct net_device *dev,
 	if (gve_tx_clean_pending(priv, &priv->tx[tx_qid]))
 		napi_schedule(napi_tx);
 
-done:
-	xsk_pool_dma_unmap(pool,
-			   DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING);
 	return 0;
 }
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
@@ -2558,10 +2574,26 @@ static int gve_init_priv(struct gve_priv *priv, bool skip_describe_device)
 	}
 
 setup_device:
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+	priv->xsk_pools = bitmap_zalloc(priv->rx_cfg.max_queues, GFP_KERNEL);
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+	if (!priv->xsk_pools) {
+		err = -ENOMEM;
+		goto err;
+	}
+
 	gve_set_netdev_xdp_features(priv);
 	err = gve_setup_device_resources(priv);
-	if (!err)
-		return 0;
+	if (err)
+		goto err_free_xsk_bitmap;
+
+	return 0;
+
+err_free_xsk_bitmap:
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+	bitmap_free(priv->xsk_pools);
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+	priv->xsk_pools = NULL;
 err:
 	gve_adminq_free(&priv->pdev->dev, priv);
 	return err;
@@ -2571,6 +2603,10 @@ static void gve_teardown_priv_resources(struct gve_priv *priv)
 {
 	gve_teardown_device_resources(priv);
 	gve_adminq_free(&priv->pdev->dev, priv);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
+	bitmap_free(priv->xsk_pools);
+#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
+	priv->xsk_pools = NULL;
 }
 
 static void gve_trigger_reset(struct gve_priv *priv)
