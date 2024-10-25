@@ -38,7 +38,7 @@
 #define GVE_DEFAULT_RX_COPYBREAK	(256)
 
 #define DEFAULT_MSG_LEVEL	(NETIF_MSG_DRV | NETIF_MSG_LINK)
-#define GVE_VERSION		 "1.4.5-0--1650674-oot"
+#define GVE_VERSION		 "1.4.5-0--b0b09e5-oot"
 #define GVE_VERSION_PREFIX	"GVE-"
 
 // Minimum amount of time between queue kicks in msec (10 seconds)
@@ -458,8 +458,12 @@ int gve_napi_poll_dqo(struct napi_struct *napi, int budget)
 	bool reschedule = false;
 	int work_done = 0;
 
-	if (block->tx)
-		reschedule |= gve_tx_poll_dqo(block, /*do_clean=*/true);
+	if (block->tx) {
+		if (block->tx->q_num < priv->tx_cfg.num_queues)
+			reschedule |= gve_tx_poll_dqo(block, /*do_clean=*/true);
+		else
+			reschedule |= gve_xdp_poll_dqo(block);
+	}
 
 	if (!budget)
 		return 0;
@@ -1693,7 +1697,8 @@ static int gve_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames
 
 	if (gve_is_gqi(priv))
 		return gve_xdp_xmit_gqi(dev, n, frames, flags);
-	return -EOPNOTSUPP;
+	else
+		return gve_xdp_xmit_dqo(dev, n, frames, flags);
 }
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 
@@ -1831,7 +1836,11 @@ static int gve_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL) */
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)) || defined(KUNIT_KERNEL)
-static int verify_xdp_configuration(struct net_device *dev)
+static int verify_xdp_configuration(struct net_device *dev
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL)
+				    , struct netdev_bpf *xdp
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL) */
+	)
 {
 	struct gve_priv *priv = netdev_priv(dev);
 	u16 max_xdp_mtu;
@@ -1840,12 +1849,23 @@ static int verify_xdp_configuration(struct net_device *dev)
 		netdev_warn(dev, "XDP is not supported when LRO is on.\n");
 		return -EOPNOTSUPP;
 	}
-
-	if (priv->queue_format != GVE_GQI_QPL_FORMAT) {
-		netdev_warn(dev, "XDP is not supported in mode %d.\n",
-			    priv->queue_format);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL)
+	/* Check XDP support for various queue formats. */
+	switch (priv->queue_format) {
+	case GVE_GQI_QPL_FORMAT:/* GQI_QPL supports everything, so ignore. */  break;
+	case GVE_DQO_RDA_FORMAT: 
+	case GVE_DQO_QPL_FORMAT:  if (xdp->command == XDP_SETUP_XSK_POOL) {
+			netdev_warn(dev,
+				    "AF_XDP zero-copy is not supported in mode %d\n",
+				    priv->queue_format);
+			return -EOPNOTSUPP;
+		}
+		break;
+default:  netdev_warn(dev, "XDP is not supported in mode %d.\n",
+		      priv->queue_format);
 		return -EOPNOTSUPP;
 	}
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL) */
 
 	max_xdp_mtu = priv->rx_cfg.packet_buffer_size - sizeof(struct ethhdr);
 	if (priv->queue_format == GVE_GQI_QPL_FORMAT)
@@ -1875,7 +1895,11 @@ static int gve_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 	struct gve_priv *priv = netdev_priv(dev);
 	int err;
 
-	err = verify_xdp_configuration(dev);
+	err = verify_xdp_configuration(dev
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL)
+				       , xdp
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL) */
+			);
 	if (err)
 		return err;
 	switch (xdp->command) {
@@ -2233,6 +2257,12 @@ static int gve_set_features(struct net_device *netdev,
 
 	if ((netdev->features & NETIF_F_LRO) != (features & NETIF_F_LRO)) {
 		netdev->features ^= NETIF_F_LRO;
+		if (priv->xdp_prog && (netdev->features & NETIF_F_LRO)) {
+			netdev_warn(netdev,
+				    "XDP is not supported when LRO is on.\n");
+			err =  -EOPNOTSUPP;
+			goto revert_features;
+		}
 		if (netif_running(netdev)) {
 			err = gve_adjust_config(priv, &tx_alloc_cfg, &rx_alloc_cfg);
 			if (err)
@@ -2417,13 +2447,19 @@ static void gve_service_task(struct work_struct *work)
 static void gve_set_netdev_xdp_features(struct gve_priv *priv)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
-	if (priv->queue_format == GVE_GQI_QPL_FORMAT) {
-		priv->dev->xdp_features = NETDEV_XDP_ACT_BASIC;
-		priv->dev->xdp_features |= NETDEV_XDP_ACT_REDIRECT;
-		priv->dev->xdp_features |= NETDEV_XDP_ACT_NDO_XMIT;
+	priv->dev->xdp_features = 0;
+
+	switch (priv->queue_format) {
+	case GVE_GQI_QPL_FORMAT:
 		priv->dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
-	} else {
-		priv->dev->xdp_features = 0;
+		fallthrough;
+	case GVE_DQO_RDA_FORMAT:
+		priv->dev->xdp_features |= NETDEV_XDP_ACT_BASIC |
+					   NETDEV_XDP_ACT_NDO_XMIT |
+					   NETDEV_XDP_ACT_REDIRECT;
+		break;
+	default:
+		break;
 	}
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6,3,0)) || defined(KUNIT_KERNEL) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4) */
 }

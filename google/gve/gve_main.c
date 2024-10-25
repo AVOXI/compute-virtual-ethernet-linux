@@ -376,8 +376,12 @@ int gve_napi_poll_dqo(struct napi_struct *napi, int budget)
 	bool reschedule = false;
 	int work_done = 0;
 
-	if (block->tx)
-		reschedule |= gve_tx_poll_dqo(block, /*do_clean=*/true);
+	if (block->tx) {
+		if (block->tx->q_num < priv->tx_cfg.num_queues)
+			reschedule |= gve_tx_poll_dqo(block, /*do_clean=*/true);
+		else
+			reschedule |= gve_xdp_poll_dqo(block);
+	}
 
 	if (!budget)
 		return 0;
@@ -1460,7 +1464,8 @@ static int gve_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames
 
 	if (gve_is_gqi(priv))
 		return gve_xdp_xmit_gqi(dev, n, frames, flags);
-	return -EOPNOTSUPP;
+	else
+		return gve_xdp_xmit_dqo(dev, n, frames, flags);
 }
 
 static int gve_xsk_pool_enable(struct net_device *dev,
@@ -1597,12 +1602,6 @@ static int verify_xdp_configuration(struct net_device *dev)
 
 	if (dev->features & NETIF_F_LRO) {
 		netdev_warn(dev, "XDP is not supported when LRO is on.\n");
-		return -EOPNOTSUPP;
-	}
-
-	if (priv->queue_format != GVE_GQI_QPL_FORMAT) {
-		netdev_warn(dev, "XDP is not supported in mode %d.\n",
-			    priv->queue_format);
 		return -EOPNOTSUPP;
 	}
 
@@ -1943,6 +1942,12 @@ static int gve_set_features(struct net_device *netdev,
 
 	if ((netdev->features & NETIF_F_LRO) != (features & NETIF_F_LRO)) {
 		netdev->features ^= NETIF_F_LRO;
+		if (priv->xdp_prog && (netdev->features & NETIF_F_LRO)) {
+			netdev_warn(netdev,
+				    "XDP is not supported when LRO is on.\n");
+			err =  -EOPNOTSUPP;
+			goto revert_features;
+		}
 		if (netif_running(netdev)) {
 			err = gve_adjust_config(priv, &tx_alloc_cfg, &rx_alloc_cfg);
 			if (err)
@@ -2094,13 +2099,19 @@ static void gve_service_task(struct work_struct *work)
 
 static void gve_set_netdev_xdp_features(struct gve_priv *priv)
 {
-	if (priv->queue_format == GVE_GQI_QPL_FORMAT) {
-		priv->dev->xdp_features = NETDEV_XDP_ACT_BASIC;
-		priv->dev->xdp_features |= NETDEV_XDP_ACT_REDIRECT;
-		priv->dev->xdp_features |= NETDEV_XDP_ACT_NDO_XMIT;
+	priv->dev->xdp_features = 0;
+
+	switch (priv->queue_format) {
+	case GVE_GQI_QPL_FORMAT:
 		priv->dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
-	} else {
-		priv->dev->xdp_features = 0;
+		fallthrough;
+	case GVE_DQO_RDA_FORMAT:
+		priv->dev->xdp_features |= NETDEV_XDP_ACT_BASIC |
+					   NETDEV_XDP_ACT_NDO_XMIT |
+					   NETDEV_XDP_ACT_REDIRECT;
+		break;
+	default:
+		break;
 	}
 }
 

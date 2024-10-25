@@ -412,8 +412,16 @@ enum gve_packet_state {
 	GVE_PACKET_STATE_TIMED_OUT_COMPL,
 };
 
+enum gve_tx_pending_packet_dqo_type {
+	GVE_TX_PENDING_PACKET_DQO_SKB,
+	GVE_TX_PENDING_PACKET_DQO_XDP_FRAME
+};
+
 struct gve_tx_pending_packet_dqo {
-	struct sk_buff *skb; /* skb for this packet */
+	union {
+		struct sk_buff *skb;
+		struct xdp_frame *xdpf;
+	};
 
 	/* 0th element corresponds to the linear portion of `skb`, should be
 	 * unmapped with `dma_unmap_single`.
@@ -444,6 +452,9 @@ struct gve_tx_pending_packet_dqo {
 	 * `enum gve_packet_state`.
 	 */
 	u8 state;
+
+	/* gve_tx_pending_packet_dqo_type */
+	u8 type;
 
 	/* If packet is an outstanding miss completion, then the packet is
 	 * freed if the corresponding re-injection completion is not received
@@ -518,8 +529,6 @@ struct gve_tx_ring {
 		struct {
 			/* Spinlock for when cleanup in progress */
 			spinlock_t clean_lock;
-			/* Spinlock for XDP tx traffic */
-			spinlock_t xdp_lock;
 		};
 
 		/* DQO fields. */
@@ -572,6 +581,10 @@ struct gve_tx_ring {
 			};
 		} dqo_compl;
 	} ____cacheline_aligned;
+
+	/* Spinlock for XDP tx traffic */
+	spinlock_t xdp_lock;
+
 	u64 pkt_done; /* free-running - total packets completed */
 	u64 bytes_done; /* free-running - total bytes completed */
 	u64 dropped_pkt; /* free-running - total packets dropped */
@@ -1186,9 +1199,13 @@ void gve_free_queue_page_list(struct gve_priv *priv,
 netdev_tx_t gve_tx(struct sk_buff *skb, struct net_device *dev);
 int gve_xdp_xmit_gqi(struct net_device *dev, int n, struct xdp_frame **frames,
 		     u32 flags);
+int gve_xdp_xmit_dqo(struct net_device *dev, int n, struct xdp_frame **frames,
+		     u32 flags);
 int gve_xdp_xmit_one(struct gve_priv *priv, struct gve_tx_ring *tx,
 		     void *data, int len, void *frame_p);
 void gve_xdp_tx_flush(struct gve_priv *priv, u32 xdp_qid);
+int gve_xdp_xmit_one_dqo(struct gve_priv *priv, struct gve_tx_ring *tx,
+			 struct xdp_frame *xdpf);
 bool gve_tx_poll(struct gve_notify_block *block, int budget);
 bool gve_xdp_poll(struct gve_notify_block *block, int budget);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0))
