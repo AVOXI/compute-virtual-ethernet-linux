@@ -1725,8 +1725,6 @@ static int gve_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
 			napi_schedule(napi);
 			local_bh_enable();
 		}
-
-		tx->xdp_xsk_wakeup++;
 	}
 
 	return 0;
