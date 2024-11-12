@@ -95,8 +95,8 @@ static void gve_rx_reset_ring_dqo(struct gve_priv *priv, int idx)
 	if (rx->dqo.buf_states) {
 		for (i = 0; i < rx->dqo.num_buf_states; i++) {
 			struct gve_rx_buf_state_dqo *bs = &rx->dqo.buf_states[i];
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
 			if (rx->dqo.page_pool)
 				gve_free_to_page_pool(rx, bs, false);
 			else
@@ -146,8 +146,8 @@ void gve_rx_free_ring_dqo(struct gve_priv *priv, struct gve_rx_ring *rx,
 
 	for (i = 0; i < rx->dqo.num_buf_states; i++) {
 		struct gve_rx_buf_state_dqo *bs = &rx->dqo.buf_states[i];
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
 		if (rx->dqo.page_pool)
 			gve_free_to_page_pool(rx, bs, false);
 		else
@@ -241,6 +241,9 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 	rx->gve = priv;
 	rx->q_num = idx;
 	rx->packet_buffer_size = cfg->packet_buffer_size;
+	rx->packet_buffer_truesize = cfg->xdp ? GVE_XDP_RX_BUFFER_SIZE_DQO :
+		rx->packet_buffer_size;
+	rx->rx_headroom = cfg->xdp ? XDP_PACKET_HEADROOM : 0;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6,7,0))
 	rx->dqo.num_buf_states = cfg->raw_addressing ? min_t(s16, S16_MAX,
@@ -295,7 +298,7 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 #else
 
 	if (cfg->raw_addressing) {
-		pool = gve_rx_create_page_pool(priv, rx);
+		pool = gve_rx_create_page_pool(priv, rx, cfg->xdp);
 		if (IS_ERR(pool))
 			goto err;
 
@@ -684,7 +687,8 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 
 	/* Sync the portion of dma buffer for CPU to read. */
 	dma_sync_single_range_for_cpu(&priv->pdev->dev, buf_state->addr,
-				      buf_state->page_info.page_offset,
+				      buf_state->page_info.page_offset +
+				      buf_state->page_info.pad,
 				      buf_len, DMA_FROM_DEVICE);
 
 	/* Append to current skb if one exists. */
@@ -734,7 +738,8 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0)) */
 
 	skb_add_rx_frag(rx->ctx.skb_head, 0, buf_state->page_info.page,
-			buf_state->page_info.page_offset, buf_len,
+			buf_state->page_info.page_offset +
+			buf_state->page_info.pad, buf_len,
 			buf_state->page_info.buf_size);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6,7,0))
 	gve_dec_pagecnt_bias(&buf_state->page_info);

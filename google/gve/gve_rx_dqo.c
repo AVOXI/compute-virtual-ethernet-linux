@@ -222,6 +222,9 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 	rx->gve = priv;
 	rx->q_num = idx;
 	rx->packet_buffer_size = cfg->packet_buffer_size;
+	rx->packet_buffer_truesize = cfg->xdp ? GVE_XDP_RX_BUFFER_SIZE_DQO :
+		rx->packet_buffer_size;
+	rx->rx_headroom = cfg->xdp ? XDP_PACKET_HEADROOM : 0;
 
 	rx->dqo.num_buf_states = cfg->raw_addressing ? buffer_queue_slots :
 		gve_get_rx_pages_per_qpl_dqo(cfg->ring_size);
@@ -252,7 +255,7 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 		goto err;
 
 	if (cfg->raw_addressing) {
-		pool = gve_rx_create_page_pool(priv, rx);
+		pool = gve_rx_create_page_pool(priv, rx, cfg->xdp);
 		if (IS_ERR(pool))
 			goto err;
 
@@ -589,7 +592,8 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 
 	/* Sync the portion of dma buffer for CPU to read. */
 	dma_sync_single_range_for_cpu(&priv->pdev->dev, buf_state->addr,
-				      buf_state->page_info.page_offset,
+				      buf_state->page_info.page_offset +
+				      buf_state->page_info.pad,
 				      buf_len, DMA_FROM_DEVICE);
 
 	/* Append to current skb if one exists. */
@@ -632,7 +636,8 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 		skb_mark_for_recycle(rx->ctx.skb_head);
 
 	skb_add_rx_frag(rx->ctx.skb_head, 0, buf_state->page_info.page,
-			buf_state->page_info.page_offset, buf_len,
+			buf_state->page_info.page_offset +
+			buf_state->page_info.pad, buf_len,
 			buf_state->page_info.buf_size);
 	gve_reuse_buffer(rx, buf_state);
 	return 0;

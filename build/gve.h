@@ -72,6 +72,13 @@
 
 #define GVE_MAX_RX_BUFFER_SIZE 4096
 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0))
+#ifndef XDP_PACKET_HEADROOM
+#define XDP_PACKET_HEADROOM 0
+#endif
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0)) */
+#define GVE_XDP_RX_BUFFER_SIZE_DQO 4096
+
 #define GVE_DEFAULT_RX_BUFFER_OFFSET 2048
 
 #define GVE_PAGE_POOL_SIZE_MULTIPLIER 4
@@ -319,11 +326,14 @@ struct gve_rx_ring {
 	u64 xdp_alloc_fails;
 	u64 xdp_actions[GVE_XDP_ACTIONS];
 	u32 q_num; /* queue index */
-	u16 packet_buffer_size;
 	u32 ntfy_id; /* notification block index */
 	struct gve_queue_resources *q_resources; /* head and tail pointer idx */
 	dma_addr_t q_resources_bus; /* dma address for the queue resources */
 	struct u64_stats_sync statss; /* sync stats for 32bit archs */
+
+	u16 packet_buffer_size; /* Size of buffer posted to NIC */
+	u16 packet_buffer_truesize; /* Total size of RX buffer */
+	u16 rx_headroom;
 
 	struct gve_rx_ctx ctx; /* Info for packet currently being processed in this ring. */
 
@@ -697,6 +707,7 @@ struct gve_rx_alloc_rings_cfg {
 	u16 packet_buffer_size;
 	bool raw_addressing;
 	bool enable_header_split;
+	bool xdp;
 
 	/* Allocated resources are returned here */
 	struct gve_rx_ring *rx;
@@ -1230,7 +1241,7 @@ struct gve_rx_buf_state_dqo *gve_get_recycled_buf_state(struct gve_rx_ring *rx);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6,7,0))
 int gve_alloc_page_dqo(struct gve_rx_ring *rx,
 		       struct gve_rx_buf_state_dqo *buf_state);
-#endif
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(6,7,0)) */
 void gve_try_recycle_buf(struct gve_priv *priv, struct gve_rx_ring *rx,
 			 struct gve_rx_buf_state_dqo *buf_state);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
@@ -1258,7 +1269,8 @@ int gve_alloc_buffer(struct gve_rx_ring *rx, struct gve_rx_desc_dqo *desc);
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0)) */
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
 struct page_pool *gve_rx_create_page_pool(struct gve_priv *priv,
-					  struct gve_rx_ring *rx);
+					  struct gve_rx_ring *rx,
+					  bool xdp);
 #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0)) */
 
 /* Reset */
