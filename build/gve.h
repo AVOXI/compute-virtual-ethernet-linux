@@ -118,9 +118,7 @@ struct gve_rx_slot_page_info {
 	struct page *page;
 	void *page_address;
 	u32 page_offset; /* offset to write to in page */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
 	unsigned int buf_size;
-#endif
 	int pagecnt_bias; /* expected pagecnt if only the driver has a ref */
 	u16 pad; /* adjustment for rx padding */
 	u8 can_flip; /* tracks if the networking stack is using the page */
@@ -241,7 +239,6 @@ struct gve_rx_ring {
 
 			/* threshold for posting new buffs and descs */
 			u32 db_threshold;
-			u16 packet_buffer_size;
 
 			u32 qpl_copy_pool_mask;
 			u32 qpl_copy_pool_head;
@@ -322,6 +319,7 @@ struct gve_rx_ring {
 	u64 xdp_alloc_fails;
 	u64 xdp_actions[GVE_XDP_ACTIONS];
 	u32 q_num; /* queue index */
+	u16 packet_buffer_size;
 	u32 ntfy_id; /* notification block index */
 	struct gve_queue_resources *q_resources; /* head and tail pointer idx */
 	dma_addr_t q_resources_bus; /* dma address for the queue resources */
@@ -647,6 +645,7 @@ struct gve_notify_block {
 struct gve_rx_queue_config {
 	u16 max_queues;
 	u16 num_queues;
+	u16 packet_buffer_size;
 };
 
 /* Tracks allowed and current tx queue settings */
@@ -848,7 +847,6 @@ struct gve_priv {
 	struct gve_ptype_lut *ptype_lut_dqo;
 
 	/* Must be a power of two. */
-	u16 data_buffer_size_dqo;
 	u16 max_rx_buffer_size; /* device limit */
 
 	enum gve_queue_format queue_format;

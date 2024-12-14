@@ -350,7 +350,7 @@ int gve_rx_alloc_ring_gqi(struct gve_priv *priv,
 	rx->db_threshold = slots / 2;
 	gve_rx_init_ring_state_gqi(rx);
 
-	rx->packet_buffer_size = GVE_DEFAULT_RX_BUFFER_SIZE;
+	rx->packet_buffer_size = cfg->packet_buffer_size;
 	gve_rx_ctx_clear(&rx->ctx);
 
 	return 0;

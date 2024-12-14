@@ -22,17 +22,6 @@ struct gve_rx_ring {
 };
 
 @@
-identifier gve_rx_slot_page_info;
-@@
-struct gve_rx_slot_page_info {
-	...
-+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
-	unsigned int buf_size;
-+#endif
-	...
-};
-
-@@
 @@
 struct gve_rx_buf_state_dqo *gve_get_recycled_buf_state(...)
 {
@@ -329,32 +318,6 @@ void gve_rx_post_buffers_dqo(struct gve_rx_ring *rx)
 		skb_mark_for_recycle(rx->ctx.skb_tail);
 +#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0)) */
 
-@@
-expression list args;
-@@
-static int gve_rx_append_frags(...)
-{
-	...
-+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
-	skb_add_rx_frag(args, buf_state->page_info.buf_size);
-+#else
-+	skb_add_rx_frag(args, priv->data_buffer_size_dqo);
-+#endif
-	...
-}
-@@
-expression list args;
-@@
-static int gve_rx_dqo(...)
-{
-	...
-+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
-	skb_add_rx_frag(args, buf_state->page_info.buf_size);
-+#else
-+	skb_add_rx_frag(args, priv->data_buffer_size_dqo);
-+#endif
-	...
-}
 
 @@
 @@
@@ -401,14 +364,6 @@ void gve_rx_free_ring_dqo(...)
 		if (rx->dqo.page_pool)
 			skb_mark_for_recycle(skb);
 +#endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0)) */
-
-@@
-@@
-+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,7,0))
-		rx->ctx.skb_head->truesize += buf_state->page_info.buf_size;
-+#else
-+		rx->ctx.skb_head->truesize += priv->data_buffer_size_dqo;
-+#endif
 
 @@
 identifier gve_rx_append_frags;
