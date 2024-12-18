@@ -542,11 +542,10 @@ static void gve_extract_tx_metadata_dqo(const struct sk_buff *skb,
 }
 
 static void gve_tx_fill_pkt_desc_dqo(struct gve_tx_ring *tx, u32 *desc_idx,
-				     struct sk_buff *skb, u32 len, u64 addr,
-				     s16 compl_tag, bool eop, bool is_gso)
+				     bool checksum_offload_en, u32 len,
+				     u64 addr, s16 compl_tag, bool eop,
+				     bool is_gso)
 {
-	const bool checksum_offload_en = skb->ip_summed == CHECKSUM_PARTIAL;
-
 	while (len > 0) {
 		struct gve_tx_pkt_desc_dqo *desc =
 			&tx->dqo.tx_ring[*desc_idx].pkt;
@@ -669,6 +668,7 @@ static int gve_tx_add_skb_no_copy_dqo(struct gve_tx_ring *tx,
 				      u32 *desc_idx,
 				      bool is_gso)
 {
+	bool checksum_offload_en = skb->ip_summed == CHECKSUM_PARTIAL;
 	const struct skb_shared_info *shinfo = skb_shinfo(skb);
 	int i;
 
@@ -694,8 +694,8 @@ static int gve_tx_add_skb_no_copy_dqo(struct gve_tx_ring *tx,
 		dma_unmap_addr_set(pkt, dma[pkt->num_bufs], addr);
 		++pkt->num_bufs;
 
-		gve_tx_fill_pkt_desc_dqo(tx, desc_idx, skb, len, addr,
-					 completion_tag,
+		gve_tx_fill_pkt_desc_dqo(tx, desc_idx, checksum_offload_en,
+					 len, addr, completion_tag,
 					 /*eop=*/shinfo->nr_frags == 0, is_gso);
 	}
 
@@ -713,8 +713,8 @@ static int gve_tx_add_skb_no_copy_dqo(struct gve_tx_ring *tx,
 		dma_unmap_addr_set(pkt, dma[pkt->num_bufs], addr);
 		++pkt->num_bufs;
 
-		gve_tx_fill_pkt_desc_dqo(tx, desc_idx, skb, len, addr,
-					 completion_tag, is_eop, is_gso);
+		gve_tx_fill_pkt_desc_dqo(tx, desc_idx, checksum_offload_en, len,
+					 addr, completion_tag, is_eop, is_gso);
 	}
 
 	return 0;
@@ -758,6 +758,7 @@ static int gve_tx_add_skb_copy_dqo(struct gve_tx_ring *tx,
 				   u32 *desc_idx,
 				   bool is_gso)
 {
+	bool checksum_offload_en = skb->ip_summed == CHECKSUM_PARTIAL;
 	u32 copy_offset = 0;
 	dma_addr_t dma_addr;
 	u32 copy_len;
@@ -779,12 +780,9 @@ static int gve_tx_add_skb_copy_dqo(struct gve_tx_ring *tx,
 		copy_offset += copy_len;
 		dma_sync_single_for_device(tx->dev, dma_addr,
 					   copy_len, DMA_TO_DEVICE);
-		gve_tx_fill_pkt_desc_dqo(tx, desc_idx, skb,
-					 copy_len,
-					 dma_addr,
-					 completion_tag,
-					 copy_offset == skb->len,
-					 is_gso);
+		gve_tx_fill_pkt_desc_dqo(tx, desc_idx, checksum_offload_en,
+					 copy_len, dma_addr, completion_tag,
+					 copy_offset == skb->len, is_gso);
 
 		pkt->tx_qpl_buf_ids[pkt->num_bufs] = index;
 		++tx->dqo_tx.alloc_tx_qpl_buf_cnt;
