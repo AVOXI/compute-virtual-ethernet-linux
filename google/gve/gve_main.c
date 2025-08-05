@@ -29,6 +29,11 @@
 #define GVE_DEFAULT_RX_COPYBREAK	(256)
 
 #define DEFAULT_MSG_LEVEL	(NETIF_MSG_DRV | NETIF_MSG_LINK)
+
+/* Module parameter to force GQI QPL format for XDP compatibility */
+static bool force_gqi_qpl = true;
+module_param(force_gqi_qpl, bool, 0644);
+MODULE_PARM_DESC(force_gqi_qpl, "Force GQI QPL queue format for XDP compatibility (default: true)");
 #define GVE_VERSION		"1.4.5.1"
 #define GVE_VERSION_PREFIX	"GVE-"
 
@@ -1742,8 +1747,13 @@ static int verify_xdp_configuration(struct net_device *dev)
 	}
 
 	if (priv->queue_format != GVE_GQI_QPL_FORMAT) {
-		netdev_warn(dev, "XDP is not supported in mode %d.\n",
-			    priv->queue_format);
+		netdev_warn(dev, "XDP is not supported in queue format %d (current: %s). XDP requires GQI QPL format (%d).\n",
+			    priv->queue_format,
+			    priv->queue_format == GVE_DQO_RDA_FORMAT ? "DQO RDA" :
+			    priv->queue_format == GVE_DQO_QPL_FORMAT ? "DQO QPL" :
+			    priv->queue_format == GVE_GQI_RDA_FORMAT ? "GQI RDA" : "Unknown",
+			    GVE_GQI_QPL_FORMAT);
+		netdev_warn(dev, "To enable XDP support, unload the driver and reload with: modprobe gve force_gqi_qpl=1\n");
 		return -EOPNOTSUPP;
 	}
 

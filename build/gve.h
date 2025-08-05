@@ -8,6 +8,10 @@
 #define _GVE_H_
 
 #include "gve_linux_version.h"
+#include <linux/types.h>
+
+/* XDP compatibility module parameter */
+extern bool force_gqi_qpl;
 #include <linux/dma-mapping.h>
 #include <linux/dmapool.h>
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0))
@@ -901,7 +905,7 @@ static inline int gve_get_enable_header_split(struct gve_priv *priv)
 {
 	return test_bit(GVE_PRIV_FLAGS_ENABLE_HEADER_SPLIT, &priv->ethtool_flags);
 }
-static inline int gve_get_enable_max_rx_buffer_size(struct gve_priv *priv) {
+static inline int gve_get_enable_max_rx_buffer_size(struct gve_priv *priv){
 	return test_bit(GVE_PRIV_FLAGS_ENABLE_MAX_RX_BUFFER_SIZE, &priv->ethtool_flags);
 }
 #endif /* LINUX_VERSION_CODE < KERNEL_VERSION(6,8,0) */

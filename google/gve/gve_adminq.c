@@ -1020,24 +1020,33 @@ int gve_adminq_describe_device(struct gve_priv *priv)
 	/* If the GQI_RAW_ADDRESSING option is not enabled and the queue format
 	 * is not set to GqiRda, choose the queue format in a priority order:
 	 * DqoRda, DqoQpl, GqiRda, GqiQpl. Use GqiQpl as default.
+	 * If force_gqi_qpl is set, use GqiQpl for XDP compatibility.
 	 */
-	if (dev_op_dqo_rda) {
+	extern bool force_gqi_qpl;
+	
+	if (force_gqi_qpl && dev_op_gqi_qpl) {
+		priv->queue_format = GVE_GQI_QPL_FORMAT;
+		supported_features_mask =
+			be32_to_cpu(dev_op_gqi_qpl->supported_features_mask);
+		dev_info(&priv->pdev->dev,
+			 "Driver is running with GQI QPL queue format (forced for XDP compatibility).\n");
+	} else if (dev_op_dqo_rda && !force_gqi_qpl) {
 		priv->queue_format = GVE_DQO_RDA_FORMAT;
 		dev_info(&priv->pdev->dev,
 			 "Driver is running with DQO RDA queue format.\n");
 		supported_features_mask =
 			be32_to_cpu(dev_op_dqo_rda->supported_features_mask);
-	} else if (dev_op_dqo_qpl) {
+	} else if (dev_op_dqo_qpl && !force_gqi_qpl) {
 		priv->queue_format = GVE_DQO_QPL_FORMAT;
 		supported_features_mask =
 			be32_to_cpu(dev_op_dqo_qpl->supported_features_mask);
-	}  else if (dev_op_gqi_rda) {
+	}  else if (dev_op_gqi_rda && !force_gqi_qpl) {
 		priv->queue_format = GVE_GQI_RDA_FORMAT;
 		dev_info(&priv->pdev->dev,
 			 "Driver is running with GQI RDA queue format.\n");
 		supported_features_mask =
 			be32_to_cpu(dev_op_gqi_rda->supported_features_mask);
-	} else if (priv->queue_format == GVE_GQI_RDA_FORMAT) {
+	} else if (priv->queue_format == GVE_GQI_RDA_FORMAT && !force_gqi_qpl) {
 		dev_info(&priv->pdev->dev,
 			 "Driver is running with GQI RDA queue format.\n");
 	} else {
@@ -1045,8 +1054,13 @@ int gve_adminq_describe_device(struct gve_priv *priv)
 		if (dev_op_gqi_qpl)
 			supported_features_mask =
 				be32_to_cpu(dev_op_gqi_qpl->supported_features_mask);
-		dev_info(&priv->pdev->dev,
-			 "Driver is running with GQI QPL queue format.\n");
+		if (force_gqi_qpl) {
+			dev_info(&priv->pdev->dev,
+				 "Driver is running with GQI QPL queue format (forced for XDP compatibility).\n");
+		} else {
+			dev_info(&priv->pdev->dev,
+				 "Driver is running with GQI QPL queue format.\n");
+		}
 	}
 
 	/* set default descriptor counts */

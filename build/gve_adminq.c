@@ -1033,24 +1033,32 @@ int gve_adminq_describe_device(struct gve_priv *priv)
 	/* If the GQI_RAW_ADDRESSING option is not enabled and the queue format
 	 * is not set to GqiRda, choose the queue format in a priority order:
 	 * DqoRda, DqoQpl, GqiRda, GqiQpl. Use GqiQpl as default.
+	 * If force_gqi_qpl is set, use GqiQpl for XDP compatibility.
 	 */
-	if (dev_op_dqo_rda) {
+	
+	if (force_gqi_qpl && dev_op_gqi_qpl) {
+		priv->queue_format = GVE_GQI_QPL_FORMAT;
+		supported_features_mask =
+			be32_to_cpu(dev_op_gqi_qpl->supported_features_mask);
+		dev_info(&priv->pdev->dev,
+			 "Driver is running with GQI QPL queue format (forced for XDP compatibility).\n");
+	} else if (dev_op_dqo_rda && !force_gqi_qpl) {
 		priv->queue_format = GVE_DQO_RDA_FORMAT;
 		dev_info(&priv->pdev->dev,
 			 "Driver is running with DQO RDA queue format.\n");
 		supported_features_mask =
 			be32_to_cpu(dev_op_dqo_rda->supported_features_mask);
-	} else if (dev_op_dqo_qpl) {
+	} else if (dev_op_dqo_qpl && !force_gqi_qpl) {
 		priv->queue_format = GVE_DQO_QPL_FORMAT;
 		supported_features_mask =
 			be32_to_cpu(dev_op_dqo_qpl->supported_features_mask);
-	}  else if (dev_op_gqi_rda) {
+	}  else if (dev_op_gqi_rda && !force_gqi_qpl) {
 		priv->queue_format = GVE_GQI_RDA_FORMAT;
 		dev_info(&priv->pdev->dev,
 			 "Driver is running with GQI RDA queue format.\n");
 		supported_features_mask =
 			be32_to_cpu(dev_op_gqi_rda->supported_features_mask);
-	} else if (priv->queue_format == GVE_GQI_RDA_FORMAT) {
+	} else if (priv->queue_format == GVE_GQI_RDA_FORMAT && !force_gqi_qpl) {
 		dev_info(&priv->pdev->dev,
 			 "Driver is running with GQI RDA queue format.\n");
 	} else {
@@ -1058,8 +1066,13 @@ int gve_adminq_describe_device(struct gve_priv *priv)
 		if (dev_op_gqi_qpl)
 			supported_features_mask =
 				be32_to_cpu(dev_op_gqi_qpl->supported_features_mask);
-		dev_info(&priv->pdev->dev,
-			 "Driver is running with GQI QPL queue format.\n");
+		if (force_gqi_qpl) {
+			dev_info(&priv->pdev->dev,
+				 "Driver is running with GQI QPL queue format (forced for XDP compatibility).\n");
+		} else {
+			dev_info(&priv->pdev->dev,
+				 "Driver is running with GQI QPL queue format.\n");
+		}
 	}
 
 	/* set default descriptor counts */
@@ -1388,7 +1401,7 @@ out:
 }
 #else /* LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,5) */
 int gve_adminq_configure_rss(struct gve_priv *priv, const u32 *indir,
-			     const u8 *hash_key, const u8 hfunc) {
+			     const u8 *hash_key, const u8 hfunc){
 	dma_addr_t lut_bus = 0, key_bus = 0;
 	u16 key_size = 0, lut_size = 0;
 	union gve_adminq_command cmd;
@@ -1413,6 +1426,7 @@ default:  return -EOPNOTSUPP;
 		if (!lut)
 			return -ENOMEM;
 
+		
 		for(i = 0;i < priv->rss_lut_size;i++)
 			lut[i] = cpu_to_be32(indir[i]);
 	}
@@ -1568,7 +1582,7 @@ static int gve_adminq_process_rss_query(struct gve_priv *priv,
 #else /* LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,5) */
 static int gve_adminq_process_rss_query(struct gve_priv *priv,
 					struct gve_query_rss_descriptor *descriptor,
-					u32 *indir, u8 *key, u8 *hfunc) {
+					u32 *indir, u8 *key, u8 *hfunc){
 	u32 total_memory_length;
 	u16 hash_lut_length;
 	void *rss_info_addr;
@@ -1587,10 +1601,12 @@ static int gve_adminq_process_rss_query(struct gve_priv *priv,
 	if (hfunc)
 		*hfunc = descriptor->hash_alg;
 
+	
 	rss_info_addr = (void *)(descriptor + 1);
 	if (key)
 		memcpy(key, rss_info_addr, priv->rss_key_size);
 
+	
 	rss_info_addr += priv->rss_key_size;
 	lut = (__be32 *)rss_info_addr;
 	if (indir) {
@@ -1632,7 +1648,7 @@ out:
 }
 #else /* LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0) || RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,5) */
 int gve_adminq_query_rss_config(struct gve_priv *priv, u32 *indir, u8 *key,
-				u8 *hfunc) {
+				u8 *hfunc){
 	struct gve_query_rss_descriptor *descriptor;
 	union gve_adminq_command cmd;
 	dma_addr_t descriptor_bus;
@@ -1643,6 +1659,7 @@ int gve_adminq_query_rss_config(struct gve_priv *priv, u32 *indir, u8 *key,
 	if (!descriptor)
 		return -ENOMEM;
 
+	
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.opcode = cpu_to_be32(GVE_ADMINQ_QUERY_RSS);
 	cmd.query_rss = (struct gve_adminq_query_rss){
@@ -1653,6 +1670,7 @@ int gve_adminq_query_rss_config(struct gve_priv *priv, u32 *indir, u8 *key,
 	if (err)
 		goto out;
 
+	
 	err = gve_adminq_process_rss_query(priv, descriptor, indir, key,
 					   hfunc);
 
