@@ -1,0 +1,7 @@
+This project provides the source code for the Linux kernel driver for Google's Compute Engine Virtual Ethernet device (gVNIC). It allows users to build and install an out-of-tree kernel module to get the latest driver features and improvements, rather than waiting for them to be included in their distribution's kernel.
+
+The driver is supported on a variety of Linux distributions and Long-Term Support (LTS) kernels. For kernels that already include the driver (versions 5.4 and newer), this out-of-tree version can be used to access the most recent enhancements.
+
+The repository includes instructions for building the driver, which requires the appropriate kernel headers. It also details how to make the driver source compatible with multiple kernel versions using Coccinelle. Once built, the driver can be loaded and configured using standard Linux tools like `modprobe` and `ethtool`.
+
+For users who need to manually configure a virtual machine to use gVNIC, the documentation provides a step-by-step guide. This process involves installing the driver, creating a new VM image with the `GVNIC` guest OS feature enabled, and then launching a new VM instance with the network interface type set to `GVNIC`.
