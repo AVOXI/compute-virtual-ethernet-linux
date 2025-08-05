@@ -31,7 +31,7 @@
 #define DEFAULT_MSG_LEVEL	(NETIF_MSG_DRV | NETIF_MSG_LINK)
 
 /* Module parameter to force GQI QPL format for XDP compatibility */
-static bool force_gqi_qpl = true;
+bool force_gqi_qpl = true;
 module_param(force_gqi_qpl, bool, 0644);
 MODULE_PARM_DESC(force_gqi_qpl, "Force GQI QPL queue format for XDP compatibility (default: true)");
 #define GVE_VERSION		"1.4.5.1"
